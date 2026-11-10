@@ -20,6 +20,21 @@ void predict(const float *image, int *label_pred)
     // load model
     ncnn::Net net;
 
+    // mnist-12 ends in a Gemm whose A input is a packed Mat on ARM. ncnn's
+    // Gemm_arm::forward computes M = A.h * A.elempack, so a Reshape output
+    // that is h=1 with elempack=4 (or 8 under fp16) inflates M to 4 (or 8)
+    // and the result Mat is created as 10x4 (or 10x8) instead of 10x1 -- the
+    // labels are then read from the wrong rows and every digit predicts the
+    // same class. Turning the packing and fp16 paths off keeps the Mat
+    // unpacked, M stays 1, and the output is 10x1 as the graph says.
+    //
+    // The cost is a little speed: packing exists so the NEON kernels can work
+    // on 4 (or 8) values at a time. Correctness first here.
+    net.opt.use_packing_layout = 0;
+    net.opt.use_fp16_storage = 0;
+    net.opt.use_fp16_packed = 0;
+    net.opt.use_fp16_arithmetic = 0;
+
     const unsigned char *param_mem = mnist_12_opt_param_bin;
     ncnn::DataReaderFromMemory param_reader(param_mem);
     int r_param = net.load_param_bin(param_reader);

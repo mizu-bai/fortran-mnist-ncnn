@@ -46,31 +46,30 @@ environment variable works too, as does naming the archive directly with
 gfortran is used by default; override with `-DCMAKE_Fortran_COMPILER=...`.
 GNU and Intel compilers have been tested.
 
-## Known issue: wrong predictions
+## A note on ncnn's ARM Gemm and packing
 
-`predict` currently reports the wrong label for the bundled images. The failure
-is **not** in this repo's Fortran/C++ code — it is reproducible through ncnn's
-own C API and with a freshly regenerated optimised model, so it is a property
-of the `mnist-12` model as ncnn executes it.
+The model's final `Gemm` produced a `10x8` result instead of `10x1` on ARM,
+which made every digit predict the same class. The cause is in ncnn, not here:
 
-What is established:
+- On ARM, `create_layer_cpu` returns a `Gemm_arm` (a `Gemm` subclass), so the
+  plain `Gemm::forward` — which computes `M = A.h = 1` correctly — is never the
+  one that runs.
+- `Gemm_arm::forward` computes `M = A.h * A.elempack`. The `A` feeding this
+  Gemm is a packed Mat (`w=64 h=1 elempack=4` in fp32, and `elempack=8` under
+  fp16), so M becomes 4 or 8 instead of 1 and the result Mat is created as
+  `10x4` or `10x8`.
+- The labels were then read from `out[0..9]`, i.e. the first row of a
+  multi-row matrix.
 
-- The image is read correctly; `image/4.dat` renders as a 4.
-- The model loads: 9 layers, weights load, and every blob up to the last has
-  the expected shape (`28x28x1`, `28x28x8`, `14x14x8`, `14x14x16`, `4x4x16`,
-  `256x1`).
-- The final `Gemm` materialises as `w=10 h=8 c=1` — 80 elements — where the
-  ONNX graph says it should be 10. `Gemm::forward` computes
-  `top_blob.create(N, M)` with `M = A.h = 1` and `N = 10`, so `h` should be 1.
-- The original code read `out[0..9]` unconditionally, i.e. the first row of an
-  8-row matrix, and discarded every ncnn return code.
+`predict.cpp` therefore turns `use_packing_layout` and the fp16 storage paths
+off for this net. That keeps A unpacked, M stays 1, and the output is `10x1`
+as the graph says. The trade-off is some speed: packing exists so the NEON
+kernels can process several values at once. For a 28x28 MNIST net that is
+irrelevant; for a larger model you would want to keep packing on and instead
+avoid a packed Mat reaching a Gemm.
 
-`predict.cpp` now checks each return code and warns when the output shape is
-not the expected 10 elements, so the failure is visible instead of silent.
-Fixing it properly means sorting out why ncnn's Gemm produces an 8-row output
-for this model — re-optimising the model, adjusting the Gemm parameters, or
-converting from the ONNX again — which is a model-side problem rather than a
-binding one.
+With that in place the bundled images classify correctly: `2.dat` → 2,
+`4.dat` → 4, `7.dat` → 7.
 
 ## References
 
